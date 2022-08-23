@@ -41,7 +41,6 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/cli-runtime/pkg/resource"
@@ -356,10 +355,10 @@ func (c *Client) watchTimeout(t time.Duration) func(*resource.Info) error {
 // For most kinds, it checks to see if the resource is marked as Added or Modified
 // by the Kubernetes event stream. For some kinds, it does more:
 //
-// - Jobs: A job is marked "Ready" when it has successfully completed. This is
-//   ascertained by watching the Status fields in a job's output.
-// - Pods: A pod is marked "Ready" when it has successfully completed. This is
-//   ascertained by watching the status.phase field in a pod's output.
+//   - Jobs: A job is marked "Ready" when it has successfully completed. This is
+//     ascertained by watching the Status fields in a job's output.
+//   - Pods: A pod is marked "Ready" when it has successfully completed. This is
+//     ascertained by watching the status.phase field in a pod's output.
 //
 // Handling for other kinds will be added as necessary.
 func (c *Client) WatchUntilReady(resources ResourceList, timeout time.Duration) error {
@@ -446,45 +445,10 @@ func createPatch(target *resource.Info, current runtime.Object) ([]byte, types.P
 	if err != nil {
 		return nil, types.StrategicMergePatchType, errors.Wrap(err, "serializing target configuration")
 	}
+	// always use generic JSON merge patch for Clusternet
+	patch, err := jsonpatch.CreateMergePatch(oldData, newData)
+	return patch, types.MergePatchType, err
 
-	// Fetch the current object for the three way merge
-	helper := resource.NewHelper(target.Client, target.Mapping).WithFieldManager(getManagedFieldsManager())
-	currentObj, err := helper.Get(target.Namespace, target.Name)
-	if err != nil && !apierrors.IsNotFound(err) {
-		return nil, types.StrategicMergePatchType, errors.Wrapf(err, "unable to get data for current object %s/%s", target.Namespace, target.Name)
-	}
-
-	// Even if currentObj is nil (because it was not found), it will marshal just fine
-	currentData, err := json.Marshal(currentObj)
-	if err != nil {
-		return nil, types.StrategicMergePatchType, errors.Wrap(err, "serializing live configuration")
-	}
-
-	// Get a versioned object
-	versionedObject := AsVersioned(target)
-
-	// Unstructured objects, such as CRDs, may not have an not registered error
-	// returned from ConvertToVersion. Anything that's unstructured should
-	// use the jsonpatch.CreateMergePatch. Strategic Merge Patch is not supported
-	// on objects like CRDs.
-	_, isUnstructured := versionedObject.(runtime.Unstructured)
-
-	// On newer K8s versions, CRDs aren't unstructured but has this dedicated type
-	_, isCRD := versionedObject.(*apiextv1beta1.CustomResourceDefinition)
-
-	if isUnstructured || isCRD {
-		// fall back to generic JSON merge patch
-		patch, err := jsonpatch.CreateMergePatch(oldData, newData)
-		return patch, types.MergePatchType, err
-	}
-
-	patchMeta, err := strategicpatch.NewPatchMetaFromStruct(versionedObject)
-	if err != nil {
-		return nil, types.StrategicMergePatchType, errors.Wrap(err, "unable to create patch metadata from object")
-	}
-
-	patch, err := strategicpatch.CreateThreeWayMergePatch(oldData, newData, currentData, patchMeta, true)
-	return patch, types.StrategicMergePatchType, err
 }
 
 func updateResource(c *Client, target *resource.Info, currentObj runtime.Object, force bool) error {
